@@ -178,6 +178,8 @@ func NewState(
 	// set function defaults (may be overwritten before calling Start)
 	cs.decideProposal = cs.defaultDecideProposal
 	cs.doPrevote = cs.defaultDoPrevote
+
+	// ADDED(md): the proposal is already known from here?
 	cs.setProposal = cs.defaultSetProposal
 
 	// We have no votes, so reconstruct LastCommit from SeenCommit.
@@ -2057,7 +2059,12 @@ func (cs *State) defaultSetProposal(proposal *types.Proposal, recvTime time.Time
 
 	p := proposal.ToProto()
 	// Verify signature
+	cs.Logger.Info("Getting proposer")
 	pubKey := cs.Validators.GetProposer().PubKey
+
+	// NOTE(md): added
+	cs.Logger.Info("Validating proposal", "proposer", pubKey.Address())
+
 	if !pubKey.VerifySignature(
 		types.ProposalSignBytes(cs.state.ChainID, p), proposal.Signature,
 	) {

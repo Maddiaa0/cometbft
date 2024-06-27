@@ -4,14 +4,22 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"log"
 	"math"
 	"math/big"
+	"os"
 	"sort"
 	"strings"
+	"time"
 
 	cmtproto "github.com/cometbft/cometbft/api/cometbft/types/v1"
 	"github.com/cometbft/cometbft/crypto/merkle"
 	cmtmath "github.com/cometbft/cometbft/libs/math"
+
+	"github.com/ethereum/go-ethereum/accounts/abi"
+	"github.com/ethereum/go-ethereum/accounts/abi/bind"
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/ethclient"
 )
 
 const (
@@ -286,7 +294,10 @@ func (vals *ValidatorSet) GetByAddress(address []byte) (index int32, val *Valida
 // This method should be used by callers who will not mutate Val.
 // Otherwise, -1 and nil are returned.
 func (vals *ValidatorSet) GetByAddressMut(address []byte) (index int32, val *Validator) {
+	fmt.Println("GETTING BY ADDRESS", address)
 	for idx, val := range vals.Validators {
+		fmt.Println("VAL ADDRESS: ", val.Address)
+
 		if bytes.Equal(val.Address, address) {
 			return int32(idx), val
 		}
@@ -342,22 +353,99 @@ func (vals *ValidatorSet) TotalVotingPower() int64 {
 // is returned.
 func (vals *ValidatorSet) GetProposer() (proposer *Validator) {
 	if len(vals.Validators) == 0 {
+		log.Println("Empty validator set")
 		return nil
 	}
-	if vals.Proposer == nil {
-		vals.Proposer = vals.findProposer()
+	// NOTE(md): always change the proposer in this case - it's a bit of a hack
+	// It can deadlock - but we prototypin
+
+	for {
+		lger := log.New(os.Stdout, "INFO: ", log.Ldate|log.Ltime|log.Lshortfile)
+		lger.Println("Getting the proposer")
+
+		proposer := vals.findProposer()
+		if proposer != nil {
+			vals.Proposer = proposer
+			break
+		}
+		time.Sleep(1 * time.Second)
 	}
+
 	return vals.Proposer.Copy()
 }
 
-func (vals *ValidatorSet) findProposer() *Validator {
+func (vals *ValidatorSet) getProposerFromL1() *Validator {
 	var proposer *Validator
-	for _, val := range vals.Validators {
-		if proposer == nil || !bytes.Equal(val.Address, proposer.Address) {
-			proposer = proposer.CompareProposerPriority(val)
-		}
+
+	lger := log.New(os.Stdout, "INFO: GETTING FROM L1", log.Ldate|log.Ltime|log.Lshortfile)
+
+	// TODO: if the below fails we want to wait 1 second for everybody to submit their votes
+
+	// TODO: theoretically we just need to change this function to be the same for all of the nodes involved
+	// Where we perform the http request to our node to GET the validator from the smart contract,
+	// We look up that validator public key in the validator set and return it
+	const PROPOSER_ABI = `[{"inputs":[],"name":"getLeader","outputs":[{"internalType":"bytes32","name":"","type":"bytes32"}],"stateMutability":"view","type":"function"}]`
+	const SIMPLE_PROPOSER_ADDRESS = "0x9A9f2CCfdE556A7E9Ff0848998Aa4a0CFD8863AE"
+
+	proposer_abi, err := abi.JSON(strings.NewReader(PROPOSER_ABI))
+	if err != nil {
+		log.Fatal(err)
 	}
+
+	// Connect to eth client
+	client, err := ethclient.Dial("http://localhost:8545")
+	if err != nil {
+		log.Fatal(err)
+	}
+	lger.Println("connected the client")
+
+	// Create a new instance of the contract
+	address := common.HexToAddress(SIMPLE_PROPOSER_ADDRESS)
+	contract := bind.NewBoundContract(address, proposer_abi, client, client, client)
+
+	// Call the getLeader function
+	var result [32]byte
+	var out []interface{}
+	err = contract.Call(nil, &out, "getLeader")
+	if err != nil {
+		log.Fatal(err)
+	}
+	lger.Println("made the call")
+
+	if len(out) == 1 {
+		result = out[0].([32]byte)
+		log.Printf("Leader: %x", result)
+	} else {
+		log.Fatal("Unexpected number of return values")
+	}
+
+	// fmt.Printf("Leader: 0x%x\n", result)
+
+	// TODO: check that the proposer is in the validator set
+	lger.Println("getting the proposer from the vals db")
+
+	index, proposer := vals.GetByAddress(result[12:32])
+	lger.Println("got the proposer from the vals db")
+
+	fmt.Printf("Proposer: %v\n", proposer)
+	fmt.Printf("Index: %v\n", index)
+	if index == -1 {
+		return nil
+	}
+
 	return proposer
+}
+
+func (vals *ValidatorSet) findProposer() *Validator {
+
+	return vals.getProposerFromL1()
+	// var proposer *Validator
+	// for _, val := range vals.Validators {
+	// 	if proposer == nil || !bytes.Equal(val.Address, proposer.Address) {
+	// 		proposer = proposer.CompareProposerPriority(val)
+	// 	}
+	// }
+	// return proposer
 }
 
 // Hash returns the Merkle root hash build using validators (as leaves) in the
